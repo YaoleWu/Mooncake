@@ -273,7 +273,9 @@ TEST_F(ClientMetricsTest, CompareWithSerializedMetrics) {
 }
 
 TEST_F(ClientMetricsTest, BatchReadItemMetricsCountFinalReceipts) {
-    TransferOperationMetric metrics({{"client_mode", "dummy"}});
+    const std::map<std::string, std::string> labels = {
+        {"client_mode", "dummy"}};
+    TransferOperationMetric metrics(labels);
     const int not_found = toInt(ErrorCode::OBJECT_NOT_FOUND);
     const int error = toInt(ErrorCode::INTERNAL_ERROR);
     const std::vector<int64_t> mixed = {4096, 2048, 0, not_found, error};
