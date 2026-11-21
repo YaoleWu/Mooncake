@@ -72,10 +72,25 @@ class TestBatchProbePolicy(unittest.TestCase):
         with self.assertRaises(TypeError):
             self.store.batch_probe_key([a], "LastHitOnly", -1)
 
+    def test_longest_prefix_leases_only_complete_leading_groups(self):
+        a, b, c, missing = self.keys
+        self.assertEqual(
+            self.store.batch_probe_key([a, b, missing, c], "LongestPrefix", 2),
+            [1, 1, 0, 1],
+        )
+        self.assertNotEqual(self.store.remove(a, False), 0)
+        self.assertEqual(self.store.remove(c, False), 0)
+        self.assertEqual(self.store.batch_probe_key([a, b], "LongestPrefix"), [1, 1])
+        self.assertEqual(self.store.batch_probe_key([], "LongestPrefix", 0), [])
+        for size in (0, 3):
+            result = self.store.batch_probe_key([a, b], "LongestPrefix", size)
+            self.assertEqual(len(result), 2)
+            self.assertTrue(all(value < 0 for value in result))
+
     def test_uninitialized_errors_are_not_misses(self):
         uninitialized = MooncakeDistributedStore()
         self.addCleanup(uninitialized.close)
-        for policy in ("none", "LastHitOnly"):
+        for policy in ("none", "LastHitOnly", "LongestPrefix"):
             result = uninitialized.batch_probe_key(self.keys, policy, 2)
             self.assertEqual(len(result), len(self.keys))
             self.assertTrue(all(value < 0 for value in result))

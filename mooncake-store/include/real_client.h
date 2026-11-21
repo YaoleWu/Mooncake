@@ -433,11 +433,11 @@ class RealClient : public PyClient {
     int probeKey(const std::string &key);
 
     /**
-     * @brief Probe multiple objects, optionally leasing the last complete
-     * candidate.
+     * @brief Probe multiple objects with optional selective leases.
      * @param keys Vector of keys to check
      * @return Per-key existence results. LastHitOnly leases the last all-1
-     * candidate. Negative values indicate errors.
+     * candidate; LongestPrefix leases consecutive all-1 candidates from the
+     * start. Negative values indicate errors.
      */
     std::vector<int> batchProbeKey(const std::vector<std::string> &keys,
                                    const GrantLeasePolicy &policy = {});

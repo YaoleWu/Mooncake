@@ -2847,6 +2847,8 @@ PYBIND11_MODULE(_store, m) {
                     lease_policy.lease_mode = ProbeLeaseMode::None;
                 } else if (policy == "LastHitOnly") {
                     lease_policy.lease_mode = ProbeLeaseMode::LastHitOnly;
+                } else if (policy == "LongestPrefix") {
+                    lease_policy.lease_mode = ProbeLeaseMode::LongestPrefix;
                 } else {
                     throw py::value_error("Unknown batch_probe_key policy: " +
                                           policy);
@@ -2863,8 +2865,10 @@ PYBIND11_MODULE(_store, m) {
             py::arg("candidate_size") = 1,
             "Per-key existence results: 1 if readable, 0 if missing, and "
             "negative values on error. none grants no leases. LastHitOnly "
-            "leases the last all-1 group of candidate_size results; failed "
-            "candidates may retain partial leases after a concurrent eviction.")
+            "leases the last all-1 group of candidate_size results. "
+            "LongestPrefix leases consecutive all-1 groups starting at the "
+            "first key. Failed candidates may retain partial leases after a "
+            "concurrent eviction.")
         .def(
             "close",
             [](MooncakeStorePyWrapper &self) {

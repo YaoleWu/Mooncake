@@ -583,8 +583,9 @@ class Client {
         const DeleteWeightRevisionRequest& request);
 
     /**
-     * @brief Probe multiple objects, optionally leasing the last complete
-     *        candidate. LastHitOnly leases the last all-true candidate.
+     * @brief Probe multiple objects with optional selective leases.
+     *        LastHitOnly leases the last all-true candidate; LongestPrefix
+     *        leases consecutive all-true candidates from the start.
      * @param keys Vector of keys to check
      * @return Per-key existence results in input order
      */

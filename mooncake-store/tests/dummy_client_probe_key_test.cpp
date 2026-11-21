@@ -40,6 +40,7 @@ static void RegisterRpcHandlers(coro_rpc::coro_rpc_server &server,
     server.register_handler<&RealClient::map_shm_internal>(&rc);
     server.register_handler<&RealClient::unmap_shm_internal>(&rc);
     server.register_handler<&RealClient::unregister_shm_buffer_internal>(&rc);
+    server.register_handler<&RealClient::remove_internal>(&rc);
     server.register_handler<&RealClient::probeKey_internal>(&rc);
     server.register_handler<&RealClient::batchProbeKey_internal>(&rc);
     server.register_handler<&RealClient::create_drain_job>(&rc);
@@ -197,6 +198,20 @@ TEST_F(DummyClientProbeKeyTest, LastHitOnlyPolicySurvivesBothRpcBoundaries) {
         {"a", "b"}, {ProbeLeaseMode::LastHitOnly, 0});
     ASSERT_EQ(invalid.size(), 2u);
     for (int value : invalid) EXPECT_LT(value, 0);
+}
+
+TEST_F(DummyClientProbeKeyTest, LongestPrefixPolicySurvivesBothRpcBoundaries) {
+    ASSERT_TRUE(SetupStack());
+    for (const auto &key : {"prefix-a", "prefix-b", "suffix"}) {
+        PutData(key, "state");
+    }
+    const GrantLeasePolicy policy{ProbeLeaseMode::LongestPrefix, 2};
+    EXPECT_EQ(dummy_client_->batchProbeKey(
+                  {"prefix-a", "prefix-b", "missing", "suffix"}, policy),
+              (std::vector<int>{1, 1, 0, 1}));
+    EXPECT_EQ(dummy_client_->remove("prefix-a"),
+              toInt(ErrorCode::OBJECT_HAS_LEASE));
+    EXPECT_EQ(dummy_client_->remove("suffix"), 0);
 }
 
 }  // namespace testing

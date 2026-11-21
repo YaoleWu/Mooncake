@@ -1727,8 +1727,8 @@ else:
 ---
 
 #### batch_probe_key()
-Probe multiple objects, optionally selecting and leasing the last complete
-candidate. The default `"none"` policy remains a lease-free existence check.
+Probe multiple objects with optional selective leases. The default `"none"`
+policy remains a lease-free existence check.
 
 ```python
 def batch_probe_key(
@@ -1738,19 +1738,24 @@ def batch_probe_key(
 
 **Parameters:**
 - `keys` (List[str]): List of object identifiers to check
-- `policy` (str): `"none"` or `"LastHitOnly"`.
+- `policy` (str): `"none"`, `"LastHitOnly"`, or `"LongestPrefix"`.
 - `candidate_size` (int): Number of consecutive keys forming each candidate.
-  Ignored for `"none"`. For a nonempty `"LastHitOnly"` request, it must be
+  Ignored for `"none"`. For a nonempty selective-lease request, it must be
   positive and divide the number of keys exactly. Empty input returns `[]`.
 
 **Returns:**
-- Both policies return per-key existence results in the same length and order
+- All policies return per-key existence results in the same length and order
   as `keys`: 1=readable when checked, 0=missing or unreadable. Negative values
   indicate errors, not cache misses.
 - With `"LastHitOnly"`, the last group of `candidate_size` all-1 results is
   the selected, leased candidate. Earlier complete groups and incomplete
   groups retain their existence results. If no group is all-1, no complete
   candidate was selected.
+- With `"LongestPrefix"`, only the consecutive complete groups from the
+  beginning are leased. After the first incomplete group, later reads may
+  still return 1, but those keys are not explicitly leased. Use the first
+  incomplete group as the restore boundary; do not treat later hits as
+  protected.
 
 Candidates are ordered by the caller. A candidate is complete when every key
 has a readable replica. Earlier candidates may be missing or incomplete.
@@ -1758,12 +1763,14 @@ The caller must include all required components,
 cache groups, and rank shards; Store does not infer prefix or model semantics.
 Duplicate key positions are allowed and must not alter the grouping.
 
-The Master first probes without leases, then rechecks and leases complete
-candidates in reverse order using the existing per-shard lookup. Recheck
-results replace that candidate's initial results; a candidate that loses a
-member cannot remain all-1. A failed candidate may retain partial leases
-while selection falls back to an earlier candidate. This is not an atomic
-snapshot of all keys, and unselected existence results are not lease guarantees.
+For `"LastHitOnly"` the Master first probes without leases, then rechecks and
+leases complete candidates in reverse order using the existing per-shard lookup.
+For `"LongestPrefix"` it checks candidates in caller order and rechecks complete
+multi-key candidates before extending the leased prefix. Recheck results replace
+initial results; a candidate that loses a member cannot remain all-1. A failed
+candidate may retain partial leases. With `"LongestPrefix"` it ends the leased
+prefix, regardless of later hits. This is not an atomic snapshot of all keys,
+and unselected existence results are not lease guarantees.
 
 Selected objects receive the Master's default read-lease TTL, protecting them
 from normal eviction while the leases remain valid; soft-pin deadlines are
@@ -1779,6 +1786,22 @@ keys = ["key1", "key2", "key3"]
 results = store.batch_probe_key(keys)
 candidates = [key for key, exists in zip(keys, results) if exists == 1]
 print("Probed candidates (unprotected from eviction):", candidates)
+```
+
+For an ordered KV prefix, keep each page's physical components together and
+lease only the leading complete pages:
+
+```python
+keys = ["page0.k", "page0.v", "page1.k", "page1.v", "page2.k", "page2.v"]
+results = store.batch_probe_key(keys, policy="LongestPrefix", candidate_size=2)
+if any(result < 0 for result in results):
+    raise RuntimeError("Prefix lookup failed")
+prefix_pages = 0
+for i in range(0, len(results), 2):
+    if not all(result == 1 for result in results[i:i + 2]):
+        break
+    prefix_pages += 1
+# For [1, 1, 0, 1, 1, 1], only page0's two keys were selected for leasing.
 ```
 
 For checkpoint selection, first use `batch_is_exist()` to protect the required
@@ -1803,6 +1826,9 @@ DummyClient-to-RealClient batch-probe RPC signatures. Upgrade the Master,
 client daemon, and clients together; mixed-version batch-probe calls are not
 supported. Default Python arguments preserve the old call syntax, not wire
 compatibility. `is_exist()`, `batch_is_exist()`, and `probe_key()` are unchanged.
+The `"LongestPrefix"` value extends the existing policy without changing its
+RPC signature. Use it only with clients and Masters that support it; an older
+Master rejects the unknown mode instead of granting unintended leases.
 
 ---
 

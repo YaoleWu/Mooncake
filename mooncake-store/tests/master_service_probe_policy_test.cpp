@@ -107,6 +107,71 @@ TEST_F(BatchProbePolicyTest, OnlySelectedCandidateSurvivesNormalEviction) {
                   {false, false, true, true});
 }
 
+TEST_F(BatchProbePolicyTest, LongestPrefixKeepsOnlyRestorablePagesLeased) {
+    MasterService service(
+        MasterServiceConfig::builder().set_default_kv_lease_ttl(60000).build());
+    const auto context = PrepareSimpleSegment(service);
+    const std::vector<std::string> prefix = {"p0-k", "p0-v", "p1-k",
+                                             "p1-v", "p2-k", "p2-v"};
+    const std::vector<std::string> baseline = {"b0-k", "b0-v", "b1-k",
+                                               "b1-v", "b2-k", "b2-v"};
+    for (size_t i : {0u, 1u, 2u, 4u, 5u}) {
+        PutCompletedObject(service, context.client_id, prefix[i],
+                           {.replica_num = 1});
+        PutCompletedObject(service, context.client_id, baseline[i],
+                           {.replica_num = 1});
+    }
+    const auto first_before = Deadline(service, prefix[0]);
+    const auto partial_before = Deadline(service, prefix[2]);
+    const auto tail_before = Deadline(service, prefix[4]);
+    const GrantLeasePolicy policy{ProbeLeaseMode::LongestPrefix, 2};
+    // A missing V component at page 1 bounds the KV prefix even when all
+    // components of page 2 are readable. The per-key hits still match Exist.
+    ExpectResults(service.BatchProbeKey(policy, prefix, TenantId::Default()),
+                  {true, true, true, false, true, true});
+    ExpectResults(service.BatchExistKey(baseline, TenantId::Default()),
+                  {true, true, true, false, true, true});
+    EXPECT_GT(Deadline(service, prefix[0]), first_before);
+    EXPECT_EQ(Deadline(service, prefix[2]), partial_before);
+    EXPECT_EQ(Deadline(service, prefix[4]), tail_before);
+
+    MasterServiceTestPeer(service).RunBatchEvictForTesting(1.0, 1.0);
+    ExpectResults(service.BatchProbeKey({}, prefix, TenantId::Default()),
+                  {true, true, false, false, false, false});
+    ExpectResults(service.BatchProbeKey({}, baseline, TenantId::Default()),
+                  {true, true, true, false, true, true});
+}
+
+TEST_F(BatchProbePolicyTest, LongestPrefixSingleKeyAndIncompleteFirstGroup) {
+    MasterService service(
+        MasterServiceConfig::builder().set_default_kv_lease_ttl(60000).build());
+    const auto context = PrepareSimpleSegment(service);
+    for (const auto& key : {"first", "tail", "partial"}) {
+        PutCompletedObject(service, context.client_id, key, {.replica_num = 1});
+    }
+    const auto first_before = Deadline(service, "first");
+    const auto tail_before = Deadline(service, "tail");
+    const auto partial_before = Deadline(service, "partial");
+    ExpectResults(service.BatchProbeKey({ProbeLeaseMode::LongestPrefix, 2},
+                                        {"partial", "missing", "tail", "tail"},
+                                        TenantId::Default()),
+                  {true, false, true, true});
+    EXPECT_EQ(Deadline(service, "partial"), partial_before);
+    EXPECT_EQ(Deadline(service, "tail"), tail_before);
+    ExpectResults(service.BatchProbeKey({ProbeLeaseMode::LongestPrefix, 1},
+                                        {"first", "missing", "tail"},
+                                        TenantId::Default()),
+                  {true, false, true});
+    EXPECT_GT(Deadline(service, "first"), first_before);
+    EXPECT_EQ(Deadline(service, "tail"), tail_before);
+    ExpectResults(service.BatchProbeKey({ProbeLeaseMode::LongestPrefix, 2},
+                                        {"tail", "tail", "first", "partial"},
+                                        TenantId::Default()),
+                  {true, true, true, true});
+    EXPECT_GT(Deadline(service, "tail"), tail_before);
+    EXPECT_GT(Deadline(service, "partial"), partial_before);
+}
+
 TEST_F(BatchProbePolicyTest, IncompleteAndUnreadableCandidatesAreNotLeased) {
     MasterService service;
     const auto context = PrepareSimpleSegment(service);
@@ -142,6 +207,10 @@ TEST_F(BatchProbePolicyTest, ValidationDoesNotLeaseAndEmptyInputIsEmpty) {
                                        {ProbeLeaseMode::LastHitOnly, 3},
                                        {ProbeLeaseMode::LastHitOnly,
                                         std::numeric_limits<uint64_t>::max()},
+                                       {ProbeLeaseMode::LongestPrefix, 0},
+                                       {ProbeLeaseMode::LongestPrefix, 3},
+                                       {ProbeLeaseMode::LongestPrefix,
+                                        std::numeric_limits<uint64_t>::max()},
                                        {static_cast<ProbeLeaseMode>(99), 1}}) {
         auto result =
             service.BatchProbeKey(policy, {"key", "key"}, TenantId::Default());
@@ -154,6 +223,10 @@ TEST_F(BatchProbePolicyTest, ValidationDoesNotLeaseAndEmptyInputIsEmpty) {
     }
     EXPECT_TRUE(
         service.BatchProbeKey(kLastPair, {}, TenantId::Default()).empty());
+    EXPECT_TRUE(service
+                    .BatchProbeKey({ProbeLeaseMode::LongestPrefix, 0}, {},
+                                   TenantId::Default())
+                    .empty());
     EXPECT_TRUE(service.BatchProbeKey({}, {}, TenantId::Default()).empty());
 }
 
@@ -276,6 +349,48 @@ TEST_F(BatchProbePolicyTest,
             auto removed = service.Remove(keys[i], TenantId::Default());
             ASSERT_FALSE(removed.has_value());
             EXPECT_EQ(removed.error(), ErrorCode::OBJECT_HAS_LEASE);
+        }
+    }
+}
+
+TEST_F(BatchProbePolicyTest, LongestPrefixConcurrentRemovalStopsLaterLeases) {
+    MasterService service(
+        MasterServiceConfig::builder().set_default_kv_lease_ttl(60000).build());
+    const auto context = PrepareSimpleSegment(service);
+    for (int iteration = 0; iteration < 32; ++iteration) {
+        std::vector<std::string> keys;
+        for (int part = 0; part < 6; ++part) {
+            keys.push_back("prefix-race-" + std::to_string(iteration) + "-" +
+                           std::to_string(part));
+            PutCompletedObject(service, context.client_id, keys.back(),
+                               {.replica_num = 1});
+        }
+        const auto tail_before = Deadline(service, keys[4]);
+        std::barrier start(2);
+        std::thread remover([&] {
+            start.arrive_and_wait();
+            service.Remove(keys[2], TenantId::Default());
+            service.Remove(keys[3], TenantId::Default());
+        });
+        start.arrive_and_wait();
+        const auto result = service.BatchProbeKey(
+            {ProbeLeaseMode::LongestPrefix, 2}, keys, TenantId::Default());
+        remover.join();
+        ASSERT_EQ(result.size(), keys.size());
+        for (const auto& item : result) ASSERT_TRUE(item.has_value());
+        size_t prefix = 0;
+        while (prefix < keys.size() && result[prefix].value() &&
+               result[prefix + 1].value()) {
+            prefix += 2;
+        }
+        ASSERT_GE(prefix, 2u);
+        for (size_t i = 0; i < prefix; ++i) {
+            const auto removed = service.Remove(keys[i], TenantId::Default());
+            ASSERT_FALSE(removed.has_value());
+            EXPECT_EQ(removed.error(), ErrorCode::OBJECT_HAS_LEASE);
+        }
+        if (prefix < keys.size()) {
+            EXPECT_EQ(Deadline(service, keys[4]), tail_before);
         }
     }
 }

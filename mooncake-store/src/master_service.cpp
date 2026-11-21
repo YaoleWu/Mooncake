@@ -2994,9 +2994,10 @@ std::vector<tl::expected<bool, ErrorCode>> MasterService::BatchProbeKey(
     if (keys.empty()) return {};
     std::string_view invalid_reason;
     if (policy.lease_mode != ProbeLeaseMode::None &&
-        policy.lease_mode != ProbeLeaseMode::LastHitOnly) {
+        policy.lease_mode != ProbeLeaseMode::LastHitOnly &&
+        policy.lease_mode != ProbeLeaseMode::LongestPrefix) {
         invalid_reason = "unknown lease mode";
-    } else if (policy.lease_mode == ProbeLeaseMode::LastHitOnly) {
+    } else if (policy.lease_mode != ProbeLeaseMode::None) {
         if (policy.candidate_size == 0) {
             invalid_reason = "candidate_size is zero";
         } else if (keys.size() % policy.candidate_size != 0) {
@@ -3012,6 +3013,9 @@ std::vector<tl::expected<bool, ErrorCode>> MasterService::BatchProbeKey(
             keys.size(), tl::make_unexpected(ErrorCode::INVALID_PARAMS));
     }
 
+    if (policy.lease_mode == ProbeLeaseMode::LongestPrefix) {
+        return BatchProbeLongestPrefix(keys, tenant_id, policy.candidate_size);
+    }
     auto results = BatchExistKeyImpl(keys, tenant_id, /*grant_lease=*/false);
     if (policy.lease_mode == ProbeLeaseMode::None) return results;
 
@@ -3040,6 +3044,57 @@ std::vector<tl::expected<bool, ErrorCode>> MasterService::BatchProbeKey(
     return results;
 }
 
+std::vector<tl::expected<bool, ErrorCode>>
+MasterService::BatchProbeLongestPrefix(const std::vector<std::string>& keys,
+                                       const TenantId& tenant_id,
+                                       size_t candidate_size) {
+    const TenantId& normalized_tenant = ResolveRequestTenantId(tenant_id);
+    std::vector<tl::expected<bool, ErrorCode>> results(keys.size());
+    std::shared_lock<std::shared_mutex> shared_lock(master_state_mutex_);
+    bool prefix_complete = true;
+    for (size_t begin = 0; begin < keys.size(); begin += candidate_size) {
+        const size_t end = begin + candidate_size;
+        bool complete = true;
+        for (size_t i = begin; i < end; ++i) {
+            // A one-key candidate can be checked and leased in one lookup.
+            const bool readable =
+                ReadKeyExistence(normalized_tenant, keys[i],
+                                 prefix_complete && candidate_size == 1);
+            results[i] = readable;
+            complete &= readable;
+        }
+        prefix_complete &= complete;
+        if (!prefix_complete || candidate_size == 1) {
+            continue;
+        }
+
+        // A multi-key candidate must first be complete. Use the ordinary
+        // per-key locking for the lease recheck; a concurrently removed
+        // member ends the prefix and no later member is explicitly leased.
+        // As with LastHitOnly, an already leased member of a failed candidate
+        // may remain protected until its lease expires.
+        for (size_t i = begin; i < end; ++i) {
+            const bool readable =
+                ReadKeyExistence(normalized_tenant, keys[i], prefix_complete);
+            results[i] = readable;
+            prefix_complete &= readable;
+        }
+    }
+    return results;
+}
+
+bool MasterService::ReadKeyExistence(const TenantId& tenant_id,
+                                     const std::string& key,
+                                     bool grant_lease) const {
+    MetadataAccessorRO accessor(this, tenant_id, key);
+    if (!accessor.Exists()) {
+        VLOG(1) << "key=" << key << ", tenant_id=" << tenant_id
+                << ", info=object_not_found";
+        return false;
+    }
+    return ReadExistence(accessor.Get(), grant_lease);
+}
+
 std::vector<tl::expected<bool, ErrorCode>> MasterService::BatchExistKeyImpl(
     const std::vector<std::string>& keys, const TenantId& tenant_id,
     bool grant_lease) {
@@ -3051,14 +3106,7 @@ std::vector<tl::expected<bool, ErrorCode>> MasterService::BatchExistKeyImpl(
 
     std::shared_lock<std::shared_mutex> shared_lock(master_state_mutex_);
     for (size_t i = 0; i < keys.size(); ++i) {
-        MetadataAccessorRO accessor(this, normalized_tenant, keys[i]);
-        if (!accessor.Exists()) {
-            VLOG(1) << "key=" << keys[i] << ", tenant_id=" << normalized_tenant
-                    << ", info=object_not_found";
-            results[i] = false;
-            continue;
-        }
-        results[i] = ReadExistence(accessor.Get(), grant_lease);
+        results[i] = ReadKeyExistence(normalized_tenant, keys[i], grant_lease);
     }
     return results;
 }

@@ -157,8 +157,9 @@ class MasterClient {
         const std::vector<std::string>& object_keys);
 
     /**
-     * @brief Probe multiple objects, optionally leasing the last complete
-     * candidate. LastHitOnly leases the last all-true candidate in the results.
+     * @brief Probe multiple objects with optional selective leases.
+     * LastHitOnly leases the last all-true candidate; LongestPrefix leases
+     * consecutive all-true candidates from the start.
      * @param object_keys Vector of keys to query
      * @return Per-key existence results in input order
      */

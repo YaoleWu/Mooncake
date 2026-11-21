@@ -1158,6 +1158,9 @@ class MasterService {
     std::vector<tl::expected<bool, ErrorCode>> BatchExistKeyImpl(
         const std::vector<std::string>& keys, const TenantId& tenant_id,
         bool grant_lease);
+    std::vector<tl::expected<bool, ErrorCode>> BatchProbeLongestPrefix(
+        const std::vector<std::string>& keys, const TenantId& tenant_id,
+        size_t candidate_size);
 
     // One pool-wide round of memory eviction (see eviction::Evictor), after
     // the housekeeping that frees expired writes and deferred releases. Each
@@ -1912,6 +1915,9 @@ class MasterService {
     // What ExistKey answers for an object: whether it has a replica to read,
     // granting it a read lease if it does and `grant_lease` is set.
     bool ReadExistence(const ObjectMetadata& metadata, bool grant_lease) const;
+    // A batch caller holds master_state_mutex_ shared and no key guard.
+    bool ReadKeyExistence(const TenantId& tenant_id, const std::string& key,
+                          bool grant_lease) const;
     // A client read of an object: its readable replicas, after the read's
     // effects on it (the read lease, the DFS LRU, hit metrics). What is left
     // for when no key is held goes to `follow_ups`.
