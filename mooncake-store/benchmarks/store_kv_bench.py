@@ -1001,6 +1001,11 @@ def percentile(values: List[float], p: float) -> float:
 
 def summarize_stats(stats: PhaseStats) -> dict:
     duration = max(stats.end_time - stats.start_time, 0.0)
+    # JSON object keys are strings; combine native status codes and named
+    # errors before sorting the summary without changing the raw counters.
+    error_counts: Counter = Counter()
+    for error, count in stats.error_counts.items():
+        error_counts[str(error)] += count
     summary = {
         "requests": stats.requests,
         "successful_requests": stats.successful_requests,
@@ -1025,7 +1030,7 @@ def summarize_stats(stats: PhaseStats) -> dict:
         "lat_p99_ms": percentile(stats.request_latencies, 0.99) * 1000,
         "latency_samples": len(stats.request_latencies),
         "dataset_exhausted": stats.dataset_exhausted,
-        "error_counts": dict(stats.error_counts),
+        "error_counts": dict(error_counts),
     }
     if stats.expected_hits + stats.expected_misses:
         summary.update(

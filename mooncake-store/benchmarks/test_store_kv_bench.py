@@ -416,6 +416,27 @@ class ReadMixTest(unittest.TestCase):
         self.assertEqual(stats["failed_kvs"], 10)
         self.assertEqual(stats["error_counts"], {"-800": 10})
 
+    def test_cli_reports_mixed_native_and_classified_read_errors(self):
+        store = self._fake_store({})
+        store.batch_get_into.side_effect = lambda keys, ptrs, sizes: [-800, -704]
+        code, summary = self._run_cli(
+            store,
+            [
+                "--read-hit-pct=100",
+                "--batch-size=2",
+                "--numjobs=1",
+                "--prepare-mode=none",
+            ],
+        )
+        self.assertEqual(code, 22)
+        self.assertFalse(summary["ok"])
+        for stats in (summary["phases"]["read_mix"], summary["overall"]):
+            self.assertEqual(stats["expected_hits"], 10)
+            self.assertEqual(stats["matched_hits"], 0)
+            self.assertEqual(stats["failed_kvs"], 10)
+            self.assertEqual(stats["misses"], 5)
+            self.assertEqual(stats["error_counts"], {"-800": 5, "UNEXPECTED_MISS": 5})
+
     def test_rejects_backends_without_unambiguous_status_and_timed_mix(self):
         for extra in (
             "--store-backend=rs",
